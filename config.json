@@ -1,0 +1,47 @@
+{
+    "Train": {
+        "scenario1": {
+            "input": "data/formated/CL_formated_train.json",
+            "output": "data/process/scenario1_train.pkl"
+        },
+        "scenario2": {
+            "input": "data/formated/Scisumnet_formated_1.json",
+            "input_2": "data/formated/Scisumnet_formated_2.json",
+            "output": "data/process/scenario2_train.pkl"
+        },
+        "scenario3": {
+            "input": "data/formated/CiteArxiv_Train.pkl",
+            "output": "data/process/scenario3_train.pkl"
+        }
+    },
+    "Test": {
+        "scenario1": {
+            "input": "data/formated/CL_formated_test.json",
+            "output": "data/process/scenario1_test.pkl"
+        },
+        "scenario2": {
+            "input": "data/formated/CL_formated_train.json",
+            "input_2": "data/formated/CL_formated_test.json",
+            "output": "data/process/scenario2_test.pkl"
+        },
+        "scenario3": {
+            "input": "data/formated/CiteArxiv_Test.pkl",
+            "output_dir": "data/process/scenario3_test.pkl"
+        }
+    },
+    "checkpoint": {
+        "scenario1": {
+            "c": "data/checkpoint/c_47_scenario1.mdl",
+            "e": "data/checkpoint/e_47_scenario1.mdl"
+        },
+        "scenario2": {
+            "c": "data/checkpoint/c_77_scenario2.mdl",
+            "e": "data/checkpoint/e_77_scenario2.mdl"
+        },
+        "scenario3": {
+            "c": "data/checkpoint/c_15_scenario3.mdl",
+            "e": "data/checkpoint/e_15_scenario3.mdl"
+        }
+        
+    }
+}
