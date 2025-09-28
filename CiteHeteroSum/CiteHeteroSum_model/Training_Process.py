@@ -22,42 +22,42 @@ def concat_with_overlap(str1, str2):
     merged_tokens = tokens1 + tokens2[overlap_length:]
     return ' '.join(merged_tokens)
 
-def get_summary(scores, edus, max_word_num, edu_num, kappa):
-    assert len(scores) == len(edus)
+def get_summary(scores, sentences, max_word_num, sent_num, kappa):
+    assert len(scores) == len(sentences)
     ranked_score_idxs = torch.argsort(scores, dim=0, descending=True)
 
     wordCnt = 0
-    summEduIDList = []
+    summSentIDList = []
     for i in ranked_score_idxs:
-        if wordCnt >= max_word_num and edu_num == 0:
+        if wordCnt >= max_word_num and sent_num == 0:
             break
-        elif edu_num > 0 and len(summEduIDList) == edu_num:
+        elif sent_num > 0 and len(summSentIDList) == sent_num:
             break
-        s = edus[i]
+        s = sentences[i]
 
         replicated = False
         if scores.squeeze(0)[i].item() < 0:
             replicated = True
 
-        for chosedID in summEduIDList:
-            eval_score = get_rouge(edus[chosedID], s)
+        for chosedID in summSentIDList:
+            eval_score = get_rouge(sentences[chosedID], s)
             if r2p(eval_score) >= kappa:
                 replicated = True
                 break
         if replicated: continue
 
         wordCnt += len(s.split(' '))
-        summEduIDList.append(i)
-    summEduIDList = sorted(summEduIDList)
+        summSentIDList.append(i)
+    summSentIDList = sorted(summSentIDList)
 
-    selected_edu = [s for i, s in enumerate(edus) if i in summEduIDList]
+    selected_sentences = [s for i, s in enumerate(sentences) if i in summSentIDList]
     predicted_summary = ""
-    for edu in selected_edu:
-        predicted_summary = concat_with_overlap(predicted_summary, edu)
+    for sentence in selected_sentences:
+        predicted_summary = concat_with_overlap(predicted_summary, sentence)
 
     return predicted_summary
 
-def train_e2e(train_dataloader, model, optimizer, loss_method, summary_max_word_num, edu_num, kappa):
+def train_e2e(train_dataloader, model, optimizer, loss_method, summary_max_word_num, sent_num, kappa):
     model[0].train()
     model[1].train()
 
@@ -72,7 +72,7 @@ def train_e2e(train_dataloader, model, optimizer, loss_method, summary_max_word_
         s_loss += bs_loss
         batch_num += 1
 
-        predicted_text = get_summary(scores[0], data.edus, summary_max_word_num, edu_num=edu_num, kappa=kappa)
+        predicted_text = get_summary(scores[0], data.sentences, summary_max_word_num, sent_num=sent_num, kappa=kappa)
         eval_score = get_rouge(data.golden, predicted_text)
         rouge2_score.append(r2f(eval_score))
 
@@ -83,7 +83,7 @@ def train_e2e(train_dataloader, model, optimizer, loss_method, summary_max_word_
 
     return loss / batch_num, np.mean(rouge2_score)
 
-def val_e2e(val_dataloader, model, loss_method, summary_max_word_num, edu_num, kappa):
+def val_e2e(val_dataloader, model, loss_method, summary_max_word_num, sent_num, kappa):
     model[0].eval()
     model[1].eval()
 
@@ -100,7 +100,7 @@ def val_e2e(val_dataloader, model, loss_method, summary_max_word_num, edu_num, k
         c_loss += c_loss_b
         s_loss += s_loss_b
 
-        predicted_summary = get_summary(scores[0], data.edus, summary_max_word_num, edu_num=edu_num, kappa=kappa)
+        predicted_summary = get_summary(scores[0], data.sentences, summary_max_word_num, sent_num=sent_num, kappa=kappa)
         all_gt.append(data.golden)
         all_summaries.append(predicted_summary)
         eval_score = get_rouge(data.golden, predicted_summary)
@@ -123,26 +123,26 @@ def train_e2e_batch(data_batch, model, optimizer, loss_method):
         optimizer.zero_grad()
         feature = data_batch.feature.unsqueeze(0)
         adj = data_batch.adj.unsqueeze(0)
+        doc_num = data_batch.doc_num
         sect_num = data_batch.sect_num
-        sent_num = data_batch.sent_num
         labels = data_batch.score_onehot.unsqueeze(0)
         labels_neg = data_batch.score_onehot_neg.unsqueeze(0)
         golden_vec = data_batch.golden_vec
 
-        pg = c_model(feature.cuda(), adj.cuda(), sect_num, sent_num)
-        x = s_model(pg.cuda(), adj.cuda(), sect_num, sent_num)
+        pg = c_model(feature.cuda(), adj.cuda(), doc_num, sect_num)
+        x = s_model(pg.cuda(), adj.cuda(), doc_num, sect_num)
 
         x = torch.clamp(x.squeeze(-1), min=-700, max=700)
         s_loss = F.binary_cross_entropy_with_logits(x, labels.cuda(), pos_weight=torch.tensor(10).cuda())
         pg = pg.squeeze(0)
 
         pos_mask = torch.zeros(1, feature.shape[1])
-        pos_mask[:, :-sect_num - sent_num] = labels
-        pos_mask[:, -sect_num - sent_num:] = 1
+        pos_mask[:, :-sect_num - doc_num] = labels
+        pos_mask[:, -sect_num - doc_num:] = 1
 
         neg_mask = torch.zeros(1, feature.shape[1])
-        neg_mask[:, :-sect_num - sent_num] = labels_neg
-        neg_mask[:, -sect_num - sent_num:] = 1
+        neg_mask[:, :-sect_num - doc_num] = labels_neg
+        neg_mask[:, -sect_num - doc_num:] = 1
 
         if torch.any(pos_mask):
             pos_distances, neg_distances = pairwise_distances(golden_vec.cuda(), pg, pos_mask.cuda(), neg_mask.cuda())
@@ -165,25 +165,25 @@ def val_e2e_batch(data_batch, model, loss_method):
         s_model = model[1]
         feature = data_batch.feature.unsqueeze(0)
         adj = data_batch.adj.unsqueeze(0)
+        doc_num = data_batch.doc_num
         sect_num = data_batch.sect_num
-        sent_num = data_batch.sent_num
         labels = data_batch.score_onehot.unsqueeze(0)
         labels_neg = data_batch.score_onehot_neg.unsqueeze(0)
         golden_vec = data_batch.golden_vec
 
         with torch.no_grad():
-            pg = c_model(feature.cuda(), adj.cuda(), sect_num, sent_num)
-            x = s_model(pg.cuda(), adj.cuda(), sect_num, sent_num)
+            pg = c_model(feature.cuda(), adj.cuda(), doc_num, sect_num)
+            x = s_model(pg.cuda(), adj.cuda(), doc_num, sect_num)
 
             pg = pg.squeeze(0)
 
             pos_mask = torch.zeros(1, feature.shape[1])
-            pos_mask[:, :-sect_num - sent_num] = labels
-            pos_mask[:, -sect_num - sent_num:] = 1
+            pos_mask[:, :-sect_num - doc_num] = labels
+            pos_mask[:, -sect_num - doc_num:] = 1
 
             neg_mask = torch.zeros(1, feature.shape[1])
-            neg_mask[:, :-sect_num - sent_num] = labels_neg
-            neg_mask[:, -sect_num - sent_num:] = 1
+            neg_mask[:, :-sect_num - doc_num] = labels_neg
+            neg_mask[:, -sect_num - doc_num:] = 1
 
             if torch.any(pos_mask):
                 pos_distances, neg_distances = pairwise_distances(golden_vec.cuda(), pg, pos_mask.cuda(), neg_mask.cuda())

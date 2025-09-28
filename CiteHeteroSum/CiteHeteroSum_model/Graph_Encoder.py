@@ -96,6 +96,7 @@ class NodeScorer(nn.Module):
         self.linear = nn.Linear(in_features, 1)
     def forward(self, x):
         return torch.tanh(self.linear(x))
+
 class Gate(nn.Module):
     def __init__(self, in_features):
         super().__init__()
@@ -111,11 +112,11 @@ class StepWiseGraphConvLayer(nn.Module):
         self.act = act
         self.dropout = nn.Dropout(dropout_p)
         self.iter = iter
-        self.edu_gat = nn.ModuleList([GAT(in_features=in_dim, n_hidden=hid_dim, n_classes=in_dim,
-                                          dropout=dropout_p, n_heads=nheads) for _ in range(iter)])
         self.sent_gat = nn.ModuleList([GAT(in_features=in_dim, n_hidden=hid_dim, n_classes=in_dim,
+                                          dropout=dropout_p, n_heads=nheads) for _ in range(iter)])
+        self.sect_gat = nn.ModuleList([GAT(in_features=in_dim, n_hidden=hid_dim, n_classes=in_dim,
                                            dropout=dropout_p, n_heads=nheads) for _ in range(iter)])
-        self.sec_gat = nn.ModuleList([GAT(in_features=in_dim, n_hidden=hid_dim, n_classes=in_dim,
+        self.doc_gat = nn.ModuleList([GAT(in_features=in_dim, n_hidden=hid_dim, n_classes=in_dim,
                                           dropout=dropout_p, n_heads=nheads) for _ in range(iter)])
 
         self.feature_fusion_layer = nn.Linear(in_dim * 3, in_dim)
@@ -124,36 +125,36 @@ class StepWiseGraphConvLayer(nn.Module):
         if self.have_gate:
             self.gate = Gate(in_dim)
 
-    def forward(self, feature, adj, sect_num, sent_num):
-        edu_adj = adj.clone()
-        edu_adj[:, :, -sect_num - sent_num:] = 0
+    def forward(self, feature, adj, doc_num, sect_num):
         sent_adj = adj.clone()
-        sent_adj[:, :, :-sect_num - sent_num] = sent_adj[:, :, -sect_num:] = 0
+        sent_adj[:, :, -sect_num - doc_num:] = 0
         sect_adj = adj.clone()
-        sect_adj[:, :, :-sect_num] = 0
+        sect_adj[:, :, :-sect_num - doc_num] = sect_adj[:, :, -doc_num:] = 0
+        doc_adj = adj.clone()
+        doc_adj[:, :, :-doc_num] = 0
 
-        feature_edu = feature.clone()
         feature_sent = feature.clone()
         feature_sect = feature.clone()
+        feature_doc = feature.clone()
         feature_resi = feature
 
-        feature_edu_re = feature_edu
         feature_sent_re = feature_sent
         feature_sect_re = feature_sect
-
-        for i in range(0, self.iter):
-            feature_edu = self.edu_gat[i](feature_edu, edu_adj)
-        feature_edu += feature_edu_re
+        feature_doc_re = feature_doc
 
         for i in range(0, self.iter):
             feature_sent = self.sent_gat[i](feature_sent, sent_adj)
         feature_sent += feature_sent_re
 
         for i in range(0, self.iter):
-            feature_sect = self.sec_gat[i](feature_sect, sect_adj)
+            feature_sect = self.sect_gat[i](feature_sect, sect_adj)
         feature_sect += feature_sect_re
 
-        feature = torch.concat([feature_sect, feature_sent, feature_edu], dim=-1)
+        for i in range(0, self.iter):
+            feature_doc = self.doc_gat[i](feature_doc, doc_adj)
+        feature_doc += feature_doc_re
+
+        feature = torch.concat([feature_doc, feature_sect, feature_sent], dim=-1)
         feature = self.dropout(F.leaky_relu(self.feature_fusion_layer(feature)))
         feature = self.ffn(feature) + feature_resi
 
@@ -167,8 +168,8 @@ class Contrast_Encoder(nn.Module):
         super(Contrast_Encoder, self).__init__()
         self.graph_encoder = graph_encoder
 
-    def forward(self, p_gfeature, p_adj, sect_num, sent_num):
-        pg = self.graph_encoder(p_gfeature.float(), p_adj.float(), sect_num, sent_num)
+    def forward(self, p_gfeature, p_adj, doc_num, sect_num):
+        pg = self.graph_encoder(p_gfeature.float(), p_adj.float(), doc_num, sect_num)
         return pg
 
 class End2End_Encoder(nn.Module):
@@ -176,67 +177,67 @@ class End2End_Encoder(nn.Module):
         super(End2End_Encoder, self).__init__()
         self.dropout = nn.Dropout(dropout_p)
 
-        sec_dim =  int(in_dim / 4)
-        sent_dim =  int(in_dim / 2)
+        doc_dim = int(in_dim / 4)
+        sect_dim = int(in_dim / 2)
         mlp_deep = 5
         out_dim = int(in_dim/2)
 
-        self.linear_sec = nn.Linear(in_dim, sec_dim)
-        self.linear_sent = nn.Linear(in_dim, sent_dim)
-        self.layer_norm = nn.LayerNorm(normalized_shape=in_dim + sent_dim + sec_dim)
-        self.out_proj_layer_mlp = MLP(in_dim + sent_dim + sec_dim, out_dim, hidden_dim, act=nn.LeakyReLU(), dropout_p=dropout_p, layers= mlp_deep)
+        self.linear_doc = nn.Linear(in_dim, doc_dim)
+        self.linear_sect = nn.Linear(in_dim, sect_dim)
+        self.layer_norm = nn.LayerNorm(normalized_shape=in_dim + sect_dim + doc_dim)
+        self.out_proj_layer_mlp = MLP(in_dim + sect_dim + doc_dim, out_dim, hidden_dim, act=nn.LeakyReLU(), dropout_p=dropout_p, layers= mlp_deep)
         self.final_layer = nn.Linear(out_dim, 1)
 
-    def forward(self, x, adj, sect_num, sent_num):
+    def forward(self, x, adj, doc_num, sect_num):
         batch_size, num_nodes, feat_dim = x.shape
-        edu_part = x[:, :-sent_num - sect_num, :]
-        sent_part = x[:, -sent_num - sect_num:-sect_num, :]
-        sect_part = x[:, -sect_num:, :]
+        sent_part = x[:, :-sect_num - doc_num, :]
+        sect_part = x[:, -sect_num - doc_num:-doc_num, :]
+        doc_part = x[:, -doc_num:, :]
 
-        sent_indices = []
         sect_indices = []
+        doc_indices = []
 
         for i in range(batch_size):
-            sent_mask = adj[i, :-sent_num - sect_num, -sent_num - sect_num:-sect_num] == 1
-            sect_mask = (adj[i, :-sent_num - sect_num, -sent_num - sect_num:-sect_num] @ adj[i, -sent_num - sect_num:-sect_num, -sect_num:]) == 1
+            sect_mask = adj[i, :-sect_num - doc_num, -sect_num - doc_num:-doc_num] == 1
+            doc_mask = (adj[i, :-sect_num - doc_num, -sect_num - doc_num:-doc_num] @ adj[i, -sect_num - doc_num:-doc_num, -doc_num:]) == 1
 
-            sent_idx = sent_mask.nonzero(as_tuple=True)[1]
             sect_idx = sect_mask.nonzero(as_tuple=True)[1]
-
-            if len(sent_idx) == 0:
-                print(
-                    f"sent_idx is empty, sent_mask: {sent_mask.cpu().numpy()}\nAdj slice: {adj[i, :-sent_num - sect_num, -sent_num - sect_num:-sect_num].cpu().numpy()}\nShape of edu_part: {edu_part.shape}, Device: {x.device}, EDU indices: {list(range(edu_part.shape[1]))}")
-                sent_idx = torch.zeros(edu_part.shape[1], dtype=torch.long, device=x.device)
+            doc_idx = doc_mask.nonzero(as_tuple=True)[1]
 
             if len(sect_idx) == 0:
                 print(
-                    f"sect_idx is empty, sect_mask: {sect_mask.cpu().numpy()}\nAdj slice: {adj[i, :-sent_num - sect_num, -sect_num:].cpu().numpy()}\nShape of edu_part: {edu_part.shape}, Device: {x.device}, EDU indices: {list(range(edu_part.shape[1]))}")
-                sect_idx = torch.zeros(edu_part.shape[1], dtype=torch.long, device=x.device)
+                    f"sect_idx is empty, sect_mask: {sect_mask.cpu().numpy()}\nAdj slice: {adj[i, :-sect_num - doc_num, -sect_num - doc_num:-doc_num].cpu().numpy()}\nShape of sent_part: {sent_part.shape}, Device: {x.device}, SENT indices: {list(range(sent_part.shape[1]))}")
+                sect_idx = torch.zeros(sent_part.shape[1], dtype=torch.long, device=x.device)
 
-            sent_indices.append(sent_idx)
+            if len(doc_idx) == 0:
+                print(
+                    f"doc_idx is empty, doc_mask: {doc_mask.cpu().numpy()}\nAdj slice: {adj[i, :-sect_num - doc_num, -doc_num:].cpu().numpy()}\nShape of sent_part: {sent_part.shape}, Device: {x.device}, SENT indices: {list(range(sent_part.shape[1]))}")
+                doc_idx = torch.zeros(sent_part.shape[1], dtype=torch.long, device=x.device)
+
             sect_indices.append(sect_idx)
+            doc_indices.append(doc_idx)
 
-        sent_indices = torch.stack(sent_indices)
         sect_indices = torch.stack(sect_indices)
+        doc_indices = torch.stack(doc_indices)
 
-        edu_to_sent = torch.gather(sent_part, 1, sent_indices.unsqueeze(-1).expand(-1, -1, feat_dim))
-        edu_to_sect = torch.gather(sect_part, 1, sect_indices.unsqueeze(-1).expand(-1, -1, feat_dim))
+        sent_to_sect = torch.gather(sect_part, 1, sect_indices.unsqueeze(-1).expand(-1, -1, feat_dim))
+        sent_to_doc = torch.gather(doc_part, 1, doc_indices.unsqueeze(-1).expand(-1, -1, feat_dim))
 
-        x_combined = torch.cat([edu_part, self.linear_sent(edu_to_sent), self.linear_sec(edu_to_sect)], dim=-1)
+        x_combined = torch.cat([sent_part, self.linear_sect(sent_to_sect), self.linear_doc(sent_to_doc)], dim=-1)
         x_combined = self.layer_norm(x_combined)
         x = self.out_proj_layer_mlp(x_combined)
         x = self.final_layer(x)
         return x
 
-class End2End_Encoder_EDU(nn.Module):
+class End2End_Encoder_SENT(nn.Module):
     def __init__(self, in_dim, hidden_dim, dropout_p, mlp_layers=2):
-        super(End2End_Encoder_EDU, self).__init__()
+        super(End2End_Encoder_SENT, self).__init__()
         self.dropout = nn.Dropout(dropout_p)
         self.out_proj_layer_mlp = MLP(in_dim, in_dim, hidden_dim, act=nn.LeakyReLU(), dropout_p=dropout_p, layers=mlp_layers)
         self.final_layer = nn.Linear(in_dim, 1)
 
-    def forward(self, x, adj, sect_num, sent_num):
-        x = x[:, :-sect_num - sent_num, :]
+    def forward(self, x, adj, doc_num, sect_num):
+        x = x[:, :-sect_num - doc_num, :]
         x = self.out_proj_layer_mlp(x)
         x = self.final_layer(x)
         return x
